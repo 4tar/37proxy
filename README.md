@@ -66,4 +66,4 @@ CPU | 任意x86芯片 | x86四核芯片 | x86八核以上服务器芯片
 
 ###使用？
 
-请先阅读37proxy托管在github上示例配置文件（https://github.com/4tar/37proxy/blob/master/37proxy.conf），在理解并正确设置了配置文件之后，您就可以简单地通过执行37proxy来使用它！如有问题，欢迎联系supoort@37pool.com获得免费技术支持。
+请先阅读37proxy托管在github上示例配置文件(https://github.com/4tar/37proxy/blob/master/37proxy.conf)，在理解并正确设置了配置文件之后，您就可以简单地通过执行37proxy来使用它！如有问题，欢迎联系supoort@37pool.com获得免费技术支持。
