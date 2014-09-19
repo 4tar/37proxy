@@ -21,9 +21,12 @@
  */
 
 #include "defs.h"
+#include "sha2.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <alloca.h>
 
 extern log_level log_level_t;
 extern time_t start_time;
@@ -96,7 +99,7 @@ void *xmalloc( size_t size )
 	return ptr;
 }
 
-unsigned char h2b( const char h )
+int h2b( const char h )
 {
 	if (h >= '0' && h <= '9')
 		return h - '0';
@@ -105,14 +108,176 @@ unsigned char h2b( const char h )
 	if (h >= 'A' && h <= 'F')
 		return (h - 'A') + 10;
 
-	ASSERT(0);
-	return 0xFF;
+	return -1;
 }
 
-void hex2bin( unsigned char *b, const char *h, size_t len )
+/* Caller ensure bin has enough room and hex is valid */
+int hex2bin( unsigned char *bin, const char *h, size_t len )
 {
-	ASSERT(!(len % 2));
+	if ((len % 2))
+		return -1;
 
-	for (; len; ++b, h += 2, len -= 2)
-		*b = h2b(h[0]) << 4 | h2b(h[1]);
+	for (; len; ++bin, h += 2, len -= 2) {
+		int b1 = h2b(h[0]), b2 = h2b(h[1]);
+		if (b1 < 0 || b2 < 0)
+			return -2;
+		*bin = (unsigned char)((b1 << 4) | b2);
+	}
+
+	return 0;
+}
+
+static const char _hexchars[] = "0123456789abcdef0123456789ABCDEF";
+
+/* Caller ensure hex has enough room and bin is valid */
+void bin2hex( char *hex, const void *bin, size_t len, int up )
+{
+	const unsigned char *p = bin + (up ? 0x10 : 0);
+	while (len--) {
+		(hex++)[0] = _hexchars[p[0] >> 4];
+		(hex++)[0] = _hexchars[p[0] & 0xf];
+		++p;
+	}
+	hex[0] = '\0';
+}
+
+size_t varint_decode( const unsigned char *p, size_t size, uint64_t *n )
+{
+	if (size > 8 && p[0] == 0xff) {
+		*n = upk_u64le(p, 0);
+		return 9;
+	}
+	if (size > 4 && p[0] == 0xfe) {
+		*n = upk_u32le(p, 0);
+		return 5;
+	}
+	if (size > 2 && p[0] == 0xfd) {
+		*n = upk_u16le(p, 0);
+		return 3;
+	}
+	if (size > 0) {
+		*n = p[0];
+		return 1;
+	}
+	return 0;
+}
+
+static const char b58digits[] =
+	"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+int b58enc( char *b58, size_t *b58sz, const uint8_t *bin, size_t binsz )
+{
+	int i, j, carry, high, zcount = 0;
+	size_t size;
+	uint8_t *buf;
+
+	while (zcount < binsz && !bin[zcount]) ++zcount;
+
+	size = (binsz - zcount) * 138 / 100 + 1;
+	buf = alloca(size);
+	if (!buf)
+		return -1;
+	memset(buf, 0, size);
+
+	for (i = zcount, high = size - 1; i < binsz; ++i, high = j) {
+		for (carry = bin[i], j = size - 1; (j > high) || carry; --j) {
+			carry += 256 * buf[j];
+			buf[j] = carry % 58;
+			carry /= 58;
+		}
+	}
+
+	for (j = 0; j < size && !buf[j]; ++j);
+
+	if (*b58sz <= zcount + size - j) {
+		*b58sz = zcount + size - j + 1;
+		return -2;
+	}
+
+	if (zcount)
+		memset(b58, '1', zcount);
+	for (i = zcount; j < size; ++i, ++j)
+		b58[i] = b58digits[buf[j]];
+	b58[i] = '\0';
+	*b58sz = i + 1;
+
+	return 0;
+}
+
+static const int b58tobin_tbl[] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1,  0,  1,  2,  3,  4,  5,  6,  7,  8, -1, -1, -1, -1, -1, -1,
+	-1,  9, 10, 11, 12, 13, 14, 15, 16, -1, 17, 18, 19, 20, 21, -1,
+	22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, -1, -1, -1, -1, -1,
+	-1, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, -1, 44, 45, 46,
+	47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57
+};
+
+/* Caller ensures bin & b58 are valid */
+void b58dec( unsigned char *bin, const char *b58 )
+{
+	uint32_t c, bin32[7];
+	int len, i, j;
+	uint64_t t;
+
+	memset(bin32, 0, 7 * sizeof(uint32_t));
+	len = strlen(b58);
+	for (i = 0; i < len; i++) {
+		c = b58[i];
+		c = b58tobin_tbl[c];
+		for (j = 6; j >= 0; j--) {
+			t = ((uint64_t)bin32[j]) * 58 + c;
+			c = (t & 0x3f00000000ull) >> 32;
+			bin32[j] = t & 0xffffffffull;
+		}
+	}
+	*(bin++) = bin32[0] & 0xff;
+	for (i = 1; i < 7; ++i) {
+		*((uint32_t *)bin) = htobe32(bin32[i]);
+		bin += sizeof(uint32_t);
+	}
+}
+
+/* Caller ensure the pkhash is 20 bytes */
+static int pubkeyhash_to_address( char *addr, size_t *addrsz, const uint8_t ver,
+	const uint8_t *pkhash )
+{
+	uint8_t buf[25], hret[32];
+
+	buf[0] = ver;
+	memcpy(buf + 1, pkhash, 20);
+	sha256(buf, 21, hret);
+	sha256(hret, 32, hret);
+	memcpy(buf + 21, hret, 4);
+
+	if (b58enc(addr, addrsz, buf, 25) || (*addrsz != 35 && *addrsz != 34))
+		return 1;
+
+	b58dec(buf, addr);
+	return (buf[0] != ver || memcmp(buf + 1, pkhash, 20));
+}
+
+size_t script_to_address( char *out, size_t outsz, const uint8_t *script,
+	size_t scriptsz, int testnet )
+{
+	char addr[35];
+	size_t size = sizeof(addr);
+	int ret = -1;
+
+	if (scriptsz == 25 && script[0] == 0x76 &&
+		script[1] == 0xa9 && script[2] == 0x14 &&
+		script[23] == 0x88 && script[24] == 0xac)
+		ret = pubkeyhash_to_address(addr, &size, testnet ? 0x6f : 0x00,
+				script + 3);
+	else if (scriptsz == 23 && script[0] == 0xa9 && script[1] == 0x14 &&
+			script[22] == 0x87)
+		ret = pubkeyhash_to_address(addr, &size, testnet ? 0xc4 : 0x05,
+			script + 2);
+	if (ret)
+		return 0;
+	if (outsz >= size)
+		strcpy(out, addr);
+	return size;
 }

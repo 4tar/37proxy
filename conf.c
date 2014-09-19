@@ -32,6 +32,7 @@
 #define DEFAULT_POOL_PRIORITY	1
 #define DEFAULT_POOL_WEIGHT		100
 #define DEFAULT_POOL_TIMEOUT	120000
+#define DEFAULT_POOL_CBTOTAL	2500000000
 
 extern log_level log_level_t;
 
@@ -84,7 +85,7 @@ unknown_line:
 		for (++p; *p && (*p == ' ' || *p == '\t' || *p == '='); ++p);
 		if (*p)
 			value = p;
-
+pr_debug("line %d: %s = %s\n", i, name, value);
 		if (!strcmp(name, "proxy.host")) {
 			if (conf->host[0]) {
 duplicate_key:			
@@ -206,6 +207,30 @@ too_long_value:
 				goto duplicate_key;
 			if (value)
 				conf->pools[conf->count - 1].timeout = 1000 * atoi(value);
+		} else if (!strcmp(name, "pool.cbaddr")) {
+			if (pool_disabled)
+				continue;
+			if (conf->pools[conf->count - 1].cbaddr[0])
+				goto duplicate_key;
+			if (!value)
+				continue;
+			if (strlen(value) >= sizeof(conf->pools[0].cbaddr))
+				goto too_long_value;
+			strcpy(conf->pools[conf->count - 1].cbaddr, value);
+		} else if (!strcmp(name, "pool.cbtotal")) {
+			if (pool_disabled)
+				continue;
+			if (conf->pools[conf->count - 1].cbtotal)
+				goto duplicate_key;
+			if (value)
+				conf->pools[conf->count - 1].cbtotal = atoll(value);
+		} else if (!strcmp(name, "pool.cbperc")) {
+			if (pool_disabled)
+				continue;
+			if (conf->pools[conf->count - 1].cbperc)
+				goto duplicate_key;
+			if (value)
+				conf->pools[conf->count - 1].cbperc = atof(value);
 		} else
 			goto unknown_line;
 	}
@@ -247,6 +272,8 @@ too_long_value:
 			conf->pools[i].weight = DEFAULT_POOL_WEIGHT;
 		if (!conf->pools[i].timeout)
 			conf->pools[i].timeout = DEFAULT_POOL_TIMEOUT;
+		if (!conf->pools[i].cbtotal)
+			conf->pools[i].cbtotal = DEFAULT_POOL_CBTOTAL;
 
 		pool_config *p = &conf->pools[i];
 		pr_debug("Pool %d: prio: %d  stratum: %s:%d  login: %s/%s  timeout: %d",

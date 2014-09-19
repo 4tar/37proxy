@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <alloca.h>
 #include <jansson.h>
 #include "defs.h"
 #include "stratum.h"
@@ -204,9 +205,125 @@ static int parse_submit_response( stratum_ctx *sctx, json_t *val,
 	return 0;
 }
 
+static int check_coinbase( stratum_ctx *sctx, unsigned char *coinbase,
+	size_t cbsize )
+{
+	int i;
+	size_t pos;
+	unsigned long len, total, target, amount, script_len;
+	int found_target = 0, ret = -4;
+	pool_config *conf;
+
+	if (cbsize < 62) {
+		pr_err("Coinbase check: invalid length: %lu", cbsize);
+		return -1;
+	}
+	pos = 4;
+
+	if (coinbase[pos] != 1) {
+		pr_err("Coinbase check: multiple inputs: 0x%02x", coinbase[pos]);
+		return -2;
+	}
+	pos += 37;
+
+	if (coinbase[pos] < 2 || coinbase[pos] > 100) {
+		pr_err("Coinbase check: invalid input script sig length: 0x%02x",
+			coinbase[pos]);
+		return -3;
+	}
+	pos += 1 + coinbase[pos] + 4;
+
+	if (cbsize <= pos) {
+incomplete_cb:
+		pr_err("Coinbase check: incomplete coinbase for payout check");
+		return ret;
+	}
+
+	total = target = 0;
+
+	i = varint_decode(coinbase + pos, cbsize - pos, &len);
+	if (!i) {
+		ret = -5;
+		goto incomplete_cb;
+	}
+	pos += i;
+
+	conf = ((pool_ctx *)(sctx->cx))->conf;
+
+	while (len-- > 0) {
+		char addr[64];
+
+		if (cbsize <= pos + 8) {
+			ret = -6;
+			goto incomplete_cb;
+		}
+
+		amount = upk_u64le(coinbase, pos);
+		pos += 8;
+
+		total += amount;
+
+		i = varint_decode(coinbase + pos, cbsize - pos, &script_len);
+		if (!i || cbsize <= pos + i + script_len) {
+			ret = -7;
+			goto incomplete_cb;
+		}
+		pos += i;
+
+		i = script_to_address(addr, sizeof(addr), coinbase + pos, script_len,
+				0);
+		if (i && i <= sizeof(addr)) {
+			i = strcmp(addr, conf->cbaddr);
+			if (!i) {
+				found_target = 1;
+				target += amount;
+			}
+			pr_info("Coinbase output: %10lu -- %34s%c", amount, addr,
+				i ? '\0' : '*');
+		} else {
+			char *hex = addr;
+			if (script_len * 2 >= sizeof(addr))
+				hex = alloca(script_len * 2 + 1);
+			bin2hex(hex, coinbase + pos, script_len, 0);
+			pr_info("Coinbase output: %10lu PK %34s", amount, hex);
+		}
+
+		pos += script_len;
+	}
+	if (total < conf->cbtotal) {
+		pr_err("Coinbase check: lopsided total output amount = %lu, "
+			"expecting >=%ld", total, conf->cbtotal);
+		return -8;
+	}
+	if (conf->cbaddr[0]) {
+		if (conf->cbperc && 
+			!(total && (float)((double)target / total) >= conf->cbperc)) {
+			pr_err("Coinbase check: lopsided target/total = %g(%lu/%lu), "
+				"expecting >=%g", (total ? (double)target / total : 0),
+				target, total, conf->cbperc);
+			return -9;
+		} else if (!found_target) {
+			pr_err("Coinbase check: not found any target addr");
+			return -10;
+		}
+	}
+
+	if (cbsize < pos + 4) {
+		pr_err("Coinbase check: No room for locktime");
+		return -11;
+	}
+	pos += 4;
+
+	pr_debug("Coinbase: (size, pos, target, total) = (%lu, %lu, %lu, %lu)",
+		cbsize, pos, target, total);
+
+	return 0;
+}
+
 int parse_job( stratum_ctx *sctx, json_t *val )
 {
 	const char *s;
+	unsigned char cb[256], *p;
 	size_t len;
 
 	if (!val || !json_is_array(val) || json_array_size(val) != 9 ||
@@ -215,15 +332,39 @@ int parse_job( stratum_ctx *sctx, json_t *val )
 		return -1;
 	}
 
+	s = json_string_value(json_array_get(val, 1));
+	if (!s || 64 != strlen(s)) {
+		pr_err("Parse job error: invalid prevhash");
+		return -2;
+	}
+
 	s = json_string_value(json_array_get(val, 0));
 	if (!s || !(len = strlen(s)) || len >= sizeof(sctx->jobid)) {
 		pr_err("Parse job error: invalid job id");
-		return -2;
+		return -3;
 	}
 	if (strcmp(sctx->jobid, s)) {
 		sctx->jobUpdated = 1;
 		memcpy(sctx->jobid, s, len + 1);
 	}
+
+	s = json_string_value(json_array_get(val, 2));
+	if (!s || !(len = strlen(s)) || len % 2) {
+		pr_err("Parse job error: invalid coinbase first half");
+		return -4;
+	}
+	hex2bin(cb, s, len);
+	p = cb + len / 2 + sctx->xn1size + sctx->xn2size;
+
+	s = json_string_value(json_array_get(val, 3));
+	if (!s || !(len = strlen(s)) || len % 2) {
+		pr_err("Parse job error: invalid coinbase second half");
+		return -5;
+	}
+	hex2bin(p, s, len);
+
+	if (check_coinbase(sctx, cb, p - cb + len / 2))
+		return -6;
 
 	return 0;
 }
@@ -282,6 +423,7 @@ static int do_reconnect( stratum_ctx *sctx, json_t *val )
 		return -3;
 	}
 
+	px = sctx->cx;
 	memcpy(px->addr, s, len + 1);
 	px->conf->port = port;
 

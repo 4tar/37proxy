@@ -64,7 +64,7 @@ static void miner_read_done( uv_stream_t *stream, ssize_t nread,
 	ASSERT(mx->buf + mx->pos == buf->base);
 
 	if (nread < 0) {
-		pr_debug("Miner %s/%s@%s:%hu read error", mx->miner, mx->agent,
+		pr_debug("Miner %s/%s@%s:%hu read error: %s", mx->miner, mx->agent,
 			mx->addr, mx->port, uv_strerror(nread));
 		miner_close(mx);
 		return;

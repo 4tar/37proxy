@@ -30,8 +30,7 @@ typedef struct {
 	char sid[48];
 	double diff;
 	char jobid[32];
-	char *diffstr;
-	char *jobstr;
+	char *diffstr, *jobstr;
 
 	unsigned int msgid;
 	unsigned int shareCount, denyCount;
@@ -58,5 +57,6 @@ int stratum_init( stratum_ctx *sctx, char *buf, const char* user, const char* pa
 int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len );
 size_t stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
 	const char *jobid, const char *xn2, const char *ntime, const char* nonce );
+size_t stratum_build_reconnect( stratum_ctx *sctx, char *reconn );
 
 #endif  /* _STRATUM_H */

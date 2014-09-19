@@ -33,12 +33,15 @@ struct proxy_config;
 typedef struct pool_config {
 	struct proxy_config *conf;
 	char host[64];
-	unsigned int port:16;
+	unsigned short port:16;
 	int priority:3;
 	unsigned int weight:20;
 	unsigned int timeout:25;
 	char miner[32];
 	char passwd[32];
+	char cbaddr[36];
+	uint64_t cbtotal;
+	double cbperc;
 	struct pool_ctx *px;
 } pool_config;
 
@@ -68,13 +71,13 @@ typedef struct pool_ctx {
 	} handle;
 	uv_timer_t timer;
 	stratum_ctx sctx;
-	unsigned int count:14;
+	unsigned int count:13;
 	unsigned int scount:4;
 	unsigned int pos:12;
 	unsigned int status:3;
 	char buf[2048], dummy;
 	char diff[128], job[1536];
-	struct miner_ctx *mx[8192];
+	struct miner_ctx *mx[4096];
 } pool_ctx;
 
 typedef struct proxy_config {
@@ -128,23 +131,76 @@ void pool_submit_share( miner_ctx *px, const char *miner, const char* jobid,
 int parse_config( const char* file, proxy_config *conf );
 
 /* util.c */
-#if defined(__GNUC__)
-# define ATTRIBUTE_FORMAT_PRINTF(a, b) __attribute__((format(printf, a, b)))
-#else
-# define ATTRIBUTE_FORMAT_PRINTF(a, b)
-#endif
 typedef enum {
 	level_debug,
 	level_info,
 	level_warn,
 	level_err,
 } log_level;
+
+#if defined(__GNUC__)
+# define ATTRIBUTE_FORMAT_PRINTF(a, b) __attribute__((format(printf, a, b)))
+#else
+# define ATTRIBUTE_FORMAT_PRINTF(a, b)
+#endif
+
 void pr_debug( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_info( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_warn( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_err( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void *xmalloc(size_t size);
-void hex2bin( unsigned char *b, const char *h, size_t len );
+int hex2bin( unsigned char *b, const char *h, size_t len );
+void bin2hex( char *hex, const void *bin, size_t len, int up );
+size_t varint_decode( const unsigned char *p, size_t size, uint64_t *n );
+size_t script_to_address( char *out, size_t outsz, const uint8_t *script,
+	size_t scriptsz, int testnet );
+
+#ifndef bswap_16
+#define	bswap_16(value) ((((value) & 0xff) << 8) | ((value) >> 8))
+#define	bswap_32(value)	\
+	(((uint32_t)bswap_16((uint16_t)((value) & 0xffff)) << 16) | \
+	(uint32_t)bswap_16((uint16_t)((value) >> 16)))
+#endif 
+
+#ifndef htobe32
+# ifndef WORDS_BIGENDIAN
+#  define htobe32(x) bswap_32(x)
+# else
+#  define htobe32(x) (x)
+# endif
+#endif 
+
+static inline uint16_t upk_u16le( const void * const buf, const int offset )
+{
+	const uint8_t * const p = buf;
+	return
+		(((uint16_t)p[offset])     <<    0) |
+		(((uint16_t)p[offset + 1]) <<    8);
+}
+
+static inline uint32_t upk_u32le( const void * const buf, const int offset )
+{
+	const uint8_t * const p = buf;
+	return
+		(((uint32_t)p[offset])     <<    0) |
+		(((uint32_t)p[offset + 1]) <<    8) |
+		(((uint32_t)p[offset + 2]) << 0x10) |
+		(((uint32_t)p[offset + 3]) << 0x18);
+}
+
+static inline uint64_t upk_u64le( const void * const buf, const int offset )
+{
+	const uint8_t * const p = buf;
+	return
+		(((uint64_t)p[offset])     <<    0) |
+		(((uint64_t)p[offset + 1]) <<    8) |
+		(((uint64_t)p[offset + 2]) << 0x10) |
+		(((uint64_t)p[offset + 3]) << 0x18) |
+		(((uint64_t)p[offset + 4]) << 0x20) |
+		(((uint64_t)p[offset + 5]) << 0x28) |
+		(((uint64_t)p[offset + 6]) << 0x30) |
+		(((uint64_t)p[offset + 7]) << 0x38);
+}
 
 #if defined(NDEBUG)
 # define ASSERT(exp)

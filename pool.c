@@ -223,7 +223,7 @@ void pool_connect( pool_ctx *px, struct sockaddr *addr )
 			uv_close((uv_handle_t *)&px->timer, NULL);
 
 			px->disc_time = 0;
-			pr_err("Invalid pool addr: %s/%s:%hu", px->conf->host, px->addr,
+			pr_err("Invalid pool addr: %s/%s:%hu - %s", px->conf->host, px->addr,
 				px->conf->port, uv_strerror(err));
 			return;
 		}
