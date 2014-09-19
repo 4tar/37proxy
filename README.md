@@ -13,6 +13,8 @@ The stratum proxy designed for large mining farm featuring bandwidth saving, sta
 
 尽管37proxy设计针对大型矿场，一般几十台、几百台的小矿场亦可通过使用37proxy获益，只不过矿场规模越大，收益越加明显。即使您只有一台矿机，通过使用37proxy也能获得代理提供的诸如矿池任务检查、算力统计信息等等额外功能。
 
+甚至您也和37pool一样运营自己的矿池服务，您可以尝试将37proxy置于您的矿池服务前端，体验由37proxy代理带来的性能和稳定性提升。
+
 
 ## 特性
 * 大大降低矿场出口带宽需求
@@ -28,6 +30,10 @@ The stratum proxy designed for large mining farm featuring bandwidth saving, sta
 
 * 多操作系统支持
   * 37proxy除支持Linux、FreeBSD等多个常用服务器平台外，也支持Server 2008及以上的Windows版本，极大方便广大没有类UNIX平台经验的普通用户。
+
+* 开源
+  * 37proxy由37pool矿池后台服务端代码精简后开源推出。您可以：1.通过阅读37proxy开源版的每一行代码来理解其工作原理，并做出适合您需求的修改（再次提请您注意我们采用的是AGPL协议，所有与您修改后的服务交互的网络用户也必须获得您修改后的代码）；2.自主审核37proxy是否存在任何伤害您算力安全的行为。37pool欢迎您将修改直接通过开源社区回馈到我们维护的主干，同时我们也接受各种定制化需求的开发，请联系dev@37pool.com。
+  
 
 
 ## 部署
