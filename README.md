@@ -29,7 +29,7 @@ The stratum proxy designed for large mining farm featuring bandwidth saving, sta
   * 37proxy免费增强版提供完善的数据统计分析和矿机监控功能，开源版则通过日志提供简单的矿池、矿机算力统计信息。
 
 * 多操作系统支持
-  * 37proxy除支持Linux、FreeBSD等多个常用服务器平台外，也支持Server 2008及以上的Windows版本，极大方便广大没有类UNIX平台经验的普通用户。
+  * 37proxy除支持Linux、FreeBSD等多个常用服务器平台外，也支持Server 2008及以上的Windows版本，极大方便广大没有类UNIX平台经验的普通用户。您可以根据您使用的操作系统类型，直接到[对应目录](https://github.com/4tar/37proxy/tree/master/bin)下载预编译的版本，即刻开始使用！
 
 * 开源
   * 37proxy由37pool矿池后台服务端代码精简后开源推出。您可以：1.通过阅读37proxy开源版的每一行代码来理解其工作原理，并做出适合您需求的修改（再次提请您注意我们采用的是AGPL协议，所有与您修改后的服务交互的网络用户也必须获得您修改后的代码）；2.自主审核37proxy是否存在任何伤害您算力安全的行为。源码之前，了无秘密；算力安全，不容忽视！37pool欢迎您将修改直接通过开源社区回馈到我们维护的主干，同时我们也接受各种定制化需求的开发，请联系dev@37pool.com。
@@ -73,4 +73,5 @@ CPU | 任意x86芯片 | x86四核芯片 | x86八核以上服务器芯片
 
 ###使用？
 
-请先阅读37proxy托管在github上[示例配置文件](https://github.com/4tar/37proxy/blob/master/37proxy.conf)，在理解并正确设置了配置文件之后，您就可以简单地通过执行37proxy来使用它！如有问题，欢迎联系supoort@37pool.com获得免费技术支持。
+请先阅读37proxy托管在github上[示例配置文件](https://github.com/4tar/37proxy/blob/master/37proxy.conf)，在理解并正确设置了配置文件之后，您就可以简单地通过执行37proxy来使用它！我们建议您通过同步github源码自行编译，如果不具备编译条件，也可以根据您的操作系统类型直接下载[预编译版本](https://github.com/4tar/37proxy/tree/master/bin)，下载后请注意核对[校验码](https://github.com/4tar/37proxy/blob/master/bin/bin.sha256sum)是否一致，以防误下了篡改后的版本影响到您的算力安全。
+使用中如有任何问题，欢迎联系supoort@37pool.com获得免费技术支持。
