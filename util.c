@@ -26,23 +26,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef WIN32
+#define alloca	_alloca
+#else
 #include <alloca.h>
+#endif
 
 extern log_level log_level_t;
-extern time_t start_time;
-extern uint64_t start_timestamp;
+extern uint64_t start_time;
 
 static void pr_do( FILE *stream, const char *label, const char *fmt,
 	va_list va )
 {
 	char fmtbuf[2048 + 256];
-	struct tm t;
-	unsigned long elapsed = uv_now(uv_default_loop());
-	time_t now = start_time + elapsed / 1000;
-	unsigned short ms = elapsed % 1000;
+	uint64_t elapsed = uv_now(uv_default_loop());
+	uint64_t now = start_time + elapsed;
+#ifdef WIN32
+	int i = vsprintf(fmtbuf, fmt, va);
+#else
 	int i = vsnprintf(fmtbuf, sizeof(fmtbuf), fmt, va);
+#endif
+	unsigned short ms = now % 1000;
+	struct tm t;
 
+	now /= 1000;
+
+#ifdef WIN32
+	_localtime64_s(&t, (__time64_t *)&now);
+#else
 	localtime_r((time_t *)&now, &t);
+#endif
+
 	fprintf(stream, "%02d/%02d %02d:%02d:%02d.%03hu %-5s %s%c",
 		t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, ms,
 		label, fmtbuf, fmtbuf[i - 1] == '\n' ? '\0' : '\n');
@@ -89,11 +104,11 @@ void pr_err( const char *fmt, ... )
 	va_end(va);
 }
 
-void *xmalloc( size_t size )
+void *xmalloc( unsigned int size )
 {
 	void *ptr = malloc(size);
 	if (!ptr) {
-		pr_err("out of memory(%lu bytes)", size);
+		pr_err("out of memory(%u bytes)", size);
 		exit(1);
 	}
 	return ptr;
@@ -132,16 +147,16 @@ static const char _hexchars[] = "0123456789abcdef0123456789ABCDEF";
 /* Caller ensure hex has enough room and bin is valid */
 void bin2hex( char *hex, const void *bin, size_t len, int up )
 {
-	const unsigned char *p = bin + (up ? 0x10 : 0);
+	const unsigned char *p = bin;
+	const char *h = _hexchars + (up ? 0x10 : 0);
 	while (len--) {
-		(hex++)[0] = _hexchars[p[0] >> 4];
-		(hex++)[0] = _hexchars[p[0] & 0xf];
-		++p;
+		*hex++ = h[*p >> 4];
+		*hex++ = h[*p++ & 0xf];
 	}
 	hex[0] = '\0';
 }
 
-size_t varint_decode( const unsigned char *p, size_t size, uint64_t *n )
+unsigned int varint_decode( const unsigned char *p, size_t size, uint64_t *n )
 {
 	if (size > 8 && p[0] == 0xff) {
 		*n = upk_u64le(p, 0);
@@ -165,13 +180,13 @@ size_t varint_decode( const unsigned char *p, size_t size, uint64_t *n )
 static const char b58digits[] =
 	"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-int b58enc( char *b58, size_t *b58sz, const uint8_t *bin, size_t binsz )
+int b58enc( char *b58, unsigned int *b58sz, const uint8_t *bin, unsigned int binsz )
 {
 	int i, j, carry, high, zcount = 0;
-	size_t size;
+	unsigned int size;
 	uint8_t *buf;
 
-	while (zcount < binsz && !bin[zcount]) ++zcount;
+	while (zcount < (int)binsz && !bin[zcount]) ++zcount;
 
 	size = (binsz - zcount) * 138 / 100 + 1;
 	buf = alloca(size);
@@ -179,7 +194,7 @@ int b58enc( char *b58, size_t *b58sz, const uint8_t *bin, size_t binsz )
 		return -1;
 	memset(buf, 0, size);
 
-	for (i = zcount, high = size - 1; i < binsz; ++i, high = j) {
+	for (i = zcount, high = size - 1; i < (int)binsz; ++i, high = j) {
 		for (carry = bin[i], j = size - 1; (j > high) || carry; --j) {
 			carry += 256 * buf[j];
 			buf[j] = carry % 58;
@@ -187,7 +202,7 @@ int b58enc( char *b58, size_t *b58sz, const uint8_t *bin, size_t binsz )
 		}
 	}
 
-	for (j = 0; j < size && !buf[j]; ++j);
+	for (j = 0; j < (int)size && !buf[j]; ++j);
 
 	if (*b58sz <= zcount + size - j) {
 		*b58sz = zcount + size - j + 1;
@@ -196,7 +211,7 @@ int b58enc( char *b58, size_t *b58sz, const uint8_t *bin, size_t binsz )
 
 	if (zcount)
 		memset(b58, '1', zcount);
-	for (i = zcount; j < size; ++i, ++j)
+	for (i = zcount; j < (int)size; ++i, ++j)
 		b58[i] = b58digits[buf[j]];
 	b58[i] = '\0';
 	*b58sz = i + 1;
@@ -223,7 +238,7 @@ void b58dec( unsigned char *bin, const char *b58 )
 	uint64_t t;
 
 	memset(bin32, 0, 7 * sizeof(uint32_t));
-	len = strlen(b58);
+	len = (int)strlen(b58);
 	for (i = 0; i < len; i++) {
 		c = b58[i];
 		c = b58tobin_tbl[c];
@@ -241,8 +256,8 @@ void b58dec( unsigned char *bin, const char *b58 )
 }
 
 /* Caller ensure the pkhash is 20 bytes */
-static int pubkeyhash_to_address( char *addr, size_t *addrsz, const uint8_t ver,
-	const uint8_t *pkhash )
+static int pubkeyhash_to_address( char *addr, unsigned int *addrsz,
+	const uint8_t ver, const uint8_t *pkhash )
 {
 	uint8_t buf[25], hret[32];
 
@@ -259,11 +274,11 @@ static int pubkeyhash_to_address( char *addr, size_t *addrsz, const uint8_t ver,
 	return (buf[0] != ver || memcmp(buf + 1, pkhash, 20));
 }
 
-size_t script_to_address( char *out, size_t outsz, const uint8_t *script,
-	size_t scriptsz, int testnet )
+unsigned int script_to_address( char *out, unsigned int outsz,
+	const uint8_t *script, unsigned int scriptsz, int testnet )
 {
 	char addr[35];
-	size_t size = sizeof(addr);
+	unsigned int size = sizeof(addr);
 	int ret = -1;
 
 	if (scriptsz == 25 && script[0] == 0x76 &&

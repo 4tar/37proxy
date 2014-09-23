@@ -24,29 +24,27 @@
 #define _STRATUM_H_
 
 typedef struct {
-	unsigned char xn1size, xn2size;
-	char xn1[16];
+	unsigned int xn1size:4, xn2size:4;
+	unsigned int isServer:1, authorized:1;
+	unsigned int jobUpdated:1, diffUpdated:1;
+	unsigned int jobLen:11, diffLen:8;
 
-	char sid[48];
-	double diff;
-	char jobid[32];
-	char *diffstr, *jobstr;
+	/* 04h */ unsigned int ntime;
+	/* 08h */ char xn1[16];
+	/* 18h */ char sid[48];
+	/* 48h */ double diff;
+	/* 50h */ char jobid[32];
+	/* 70h */ char *diffstr, *jobstr;
 
-	unsigned int msgid;
-	unsigned int shareCount, denyCount;
-	double sdiff;
-	void* cx;
-
-	unsigned int isServer:1;
-	unsigned int authorized:1;
-	unsigned int jobUpdated:1;
-	unsigned int diffUpdated:1;
-	unsigned int jobLen:11;
-	unsigned int outbufLen:11;
-	unsigned int diffLen:8;
+	/* 80h */ unsigned int msgid;
+	/* 84h */ unsigned int shareCount, denyCount;
+	/* 90h */ double sdiff;
+	/* 98h */ void* cx;
 } stratum_ctx;
 
-#define STRATUM_SESSION_SIZE ((size_t)&((stratum_ctx*)NULL)->msgid)
+#define struct_pos(s, e)			((size_t)&(((s *)NULL)->e))
+#define STRATUM_SESSION_SIZE		struct_pos(stratum_ctx, msgid)
+#define STRATUM_SESSION_POS(sctx)	(&(sctx)->msgid)
 
 typedef enum {
 	stratum_server,
@@ -55,8 +53,8 @@ typedef enum {
 
 int stratum_init( stratum_ctx *sctx, char *buf, const char* user, const char* passwd );
 int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len );
-size_t stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
+int stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
 	const char *jobid, const char *xn2, const char *ntime, const char* nonce );
-size_t stratum_build_reconnect( stratum_ctx *sctx, char *reconn );
+int stratum_build_reconnect( stratum_ctx *sctx, char *reconn );
 
 #endif  /* _STRATUM_H */

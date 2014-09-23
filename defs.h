@@ -24,8 +24,16 @@
 #define _DEFS_H_
 
 #include <assert.h>
+#include <stdint.h>
 #include <uv.h>
 #include "stratum.h"
+
+#define PROXY_VER		2
+
+struct miner_ctx;
+
+typedef void (*submit_share)( struct miner_ctx *px, const char *miner,
+	const char* jobid, const char *xn2, const char *ntime, const char *nonce );
 
 struct pool_ctx;
 struct proxy_config;
@@ -53,31 +61,30 @@ typedef enum {
 	p_disconnecting,
 } pool_status;
 
-struct miner_ctx;
-
 typedef struct pool_ctx {
-	char addr[INET6_ADDRSTRLEN];
-	union {
+	/*    0h */  char addr[INET6_ADDRSTRLEN];
+	/*   30h */  union {
 		uv_connect_t conn_req;
 		uv_write_t write_req;
 	} req;
-	unsigned long disc_time;
-	pool_config *conf;
-	uv_loop_t *loop;
-	union {
+	/*   f0h */ uint64_t disc_time;
+	/*   f8h */ pool_config *conf;
+	/*  100h */ uv_loop_t *loop;
+	/*  108h */ union {
 		uv_handle_t h;
 		uv_tcp_t tcp;
 		uv_stream_t stream;
 	} handle;
-	uv_timer_t timer;
-	stratum_ctx sctx;
+	/*  200h */ uv_timer_t timer;
+	/*  298h */ stratum_ctx sctx;
+	submit_share ss;
 	unsigned int count:13;
 	unsigned int scount:4;
 	unsigned int pos:12;
 	unsigned int status:3;
-	char buf[2048], dummy;
-	char diff[128], job[1536];
-	struct miner_ctx *mx[4096];
+	/*  344h */ char buf[2048], dummy, authtype;
+	/*  b46h */ char diff[128], job[1536];
+	/* 11c8h */ struct miner_ctx *mx[4096];
 } pool_ctx;
 
 typedef struct proxy_config {
@@ -95,37 +102,41 @@ typedef struct proxy_config {
 } proxy_config;
 
 typedef struct miner_ctx {
-	char bind[INET6_ADDRSTRLEN];
-	char addr[INET6_ADDRSTRLEN];
-	unsigned short port;
-	char miner[32];
-	char agent[16];
-	proxy_config *pxx;
-	pool_ctx *px;
-	union {
+	/*    0h */ char bind[INET6_ADDRSTRLEN];
+	/*   2eh */ char addr[INET6_ADDRSTRLEN];
+	/*   5ch */ unsigned short port;
+	/*   5eh */ char miner[32];
+	/*   7eh */ char agent[16];
+	/*   90h */ proxy_config *pxx;
+	/*   98h */ pool_ctx *px;
+	/*   a0h */ union {
 		uv_handle_t h;
 		uv_tcp_t tcp;
 		uv_stream_t stream;
 	} handle;
-	uv_write_t write_req[3];
-	stratum_ctx sctx;
-	char outbuf[2048];
-	char share[2048];
-	char buf[256];
-	unsigned char dummy, pos, wpos;
-	unsigned short shareLen, lastShareLen;
+	/*  198h */ uv_write_t m_req;
+	/*  2b8h */ uv_write_t p_req;
+	/*  3d8h */ stratum_ctx sctx;
+	/*  478h */ char outbuf[2048];
+	/*  c78h */ char share[2048];
+	/* 1478h */ char buf[256];
+
+	unsigned int dummy:8, pos:8, wpos:8;
+	unsigned int closing:2, pxreconn:1;
+	unsigned int shareLen:12, lastShareLen:12, writeShareLen:12;
 } miner_ctx;
 
 /* proxy.c */
 int proxy_run();
 pool_ctx *pool_pickup( proxy_config *conf );
 void attach_miner_to_pool( pool_ctx *px, miner_ctx *mx );
-void detach_miner_from_pool( pool_ctx *px, miner_ctx *mx );
+void detach_miner_from_pool( miner_ctx *mx );
 
 /* pool.c */
 void pool_connect( pool_ctx *px, struct sockaddr *addr );
-void pool_submit_share( miner_ctx *px, const char *miner, const char* jobid,
-		const char *xn2, const char *ntime, const char *nonce );
+
+/* miner.c */
+int miner_clear( miner_ctx *mx );
 
 /* conf.c */
 int parse_config( const char* file, proxy_config *conf );
@@ -148,12 +159,12 @@ void pr_debug( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_info( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_warn( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void pr_err( const char *fmt, ... ) ATTRIBUTE_FORMAT_PRINTF(1, 2);
-void *xmalloc(size_t size);
+void *xmalloc( unsigned int size );
 int hex2bin( unsigned char *b, const char *h, size_t len );
 void bin2hex( char *hex, const void *bin, size_t len, int up );
-size_t varint_decode( const unsigned char *p, size_t size, uint64_t *n );
-size_t script_to_address( char *out, size_t outsz, const uint8_t *script,
-	size_t scriptsz, int testnet );
+unsigned int varint_decode( const unsigned char *p, size_t size, uint64_t *n );
+unsigned int script_to_address(char *out, unsigned int outsz,
+	const uint8_t *script, unsigned int scriptsz, int testnet);
 
 #ifndef bswap_16
 #define	bswap_16(value) ((((value) & 0xff) << 8) | ((value) >> 8))
@@ -163,14 +174,24 @@ size_t script_to_address( char *out, size_t outsz, const uint8_t *script,
 #endif 
 
 #ifndef htobe32
-# ifndef WORDS_BIGENDIAN
-#  define htobe32(x) bswap_32(x)
-# else
-#  define htobe32(x) (x)
-# endif
-#endif 
+#ifndef WORDS_BIGENDIAN
+#define htobe32(x) bswap_32(x)
+#define be32toh(x) bswap_32(x)
+#else
+#define htobe32(x) (x)
+#define be32toh(x) (x)
+#endif
+#endif
 
-static inline uint16_t upk_u16le( const void * const buf, const int offset )
+#ifdef WIN32
+#define STIN	static __inline
+#define time64	_time64
+#else
+#define STIN	static inline
+#define time64	time
+#endif
+
+STIN uint16_t upk_u16le( const void * const buf, const int offset )
 {
 	const uint8_t * const p = buf;
 	return
@@ -178,7 +199,7 @@ static inline uint16_t upk_u16le( const void * const buf, const int offset )
 		(((uint16_t)p[offset + 1]) <<    8);
 }
 
-static inline uint32_t upk_u32le( const void * const buf, const int offset )
+STIN uint32_t upk_u32le(const void * const buf, const int offset)
 {
 	const uint8_t * const p = buf;
 	return
@@ -188,7 +209,7 @@ static inline uint32_t upk_u32le( const void * const buf, const int offset )
 		(((uint32_t)p[offset + 3]) << 0x18);
 }
 
-static inline uint64_t upk_u64le( const void * const buf, const int offset )
+STIN uint64_t upk_u64le(const void * const buf, const int offset)
 {
 	const uint8_t * const p = buf;
 	return

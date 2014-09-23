@@ -38,8 +38,8 @@ extern log_level log_level_t;
 
 int parse_config( const char* file, proxy_config *conf )
 {
-	int i = 0, pool_disabled = 1;
-	char line[128]; /* line size should be not more than 80 for simplicity. */
+	unsigned int i = 0, pool_disabled = 1;
+	char line[128];
 	FILE* fConf = fopen(file, "r");
 	if (!fConf) {
 		pr_err("Cannot open configuration file: %s", file);
@@ -85,7 +85,7 @@ unknown_line:
 		for (++p; *p && (*p == ' ' || *p == '\t' || *p == '='); ++p);
 		if (*p)
 			value = p;
-pr_debug("line %d: %s = %s\n", i, name, value);
+
 		if (!strcmp(name, "proxy.host")) {
 			if (conf->host[0]) {
 duplicate_key:			
@@ -223,7 +223,7 @@ too_long_value:
 			if (conf->pools[conf->count - 1].cbtotal)
 				goto duplicate_key;
 			if (value)
-				conf->pools[conf->count - 1].cbtotal = atoll(value);
+				conf->pools[conf->count - 1].cbtotal = strtoul(value, NULL, 10);
 		} else if (!strcmp(name, "pool.cbperc")) {
 			if (pool_disabled)
 				continue;
@@ -241,7 +241,7 @@ too_long_value:
 		return 1;
 
 	if ((int)log_level_t < 0)
-		log_level_t = level_warn;
+		log_level_t = level_info;
 	if (log_level_t <= level_info)
 		setbuf(stdout, NULL);
 

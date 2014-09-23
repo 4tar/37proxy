@@ -21,13 +21,14 @@
  */
 
 #include "defs.h"
-#include <errno.h>
-#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void pool_timeout( uv_timer_t *timer );
 
-static void pool_broadcast( pool_ctx *px, uv_buf_t buf[], size_t count )
+extern void miner_write_done( uv_write_t *req, int status );
+
+static void pool_broadcast( pool_ctx *px, uv_buf_t buf[], unsigned int count )
 {
 	unsigned int i, j;
 
@@ -36,18 +37,34 @@ static void pool_broadcast( pool_ctx *px, uv_buf_t buf[], size_t count )
 
 	px->scount = 0;
 
-	pr_info("Pool %s/%s:%hu broadcast (%lu %g/%u %s/%u) to %u miners",
+	pr_info("Pool %s/%s:%hu broadcast (%u %g/%u %s/%u) to %u miners",
 		px->conf->host, px->addr, px->conf->port, count,
 		px->sctx.diff, px->sctx.diffLen, px->sctx.jobid, px->sctx.jobLen,
 		px->count);
 
-	for (i = j = 0; j < px->count && i < countof(px->mx); ++i)
-		if (px->mx[i]) {
-			miner_ctx *mx = px->mx[i];
-			uv_write(&mx->write_req[1], &mx->handle.stream, buf, count, NULL);
-			mx->sctx.diff = px->sctx.diff;
-			++j;
+	for (i = j = 0; j < px->count && i < countof(px->mx); ++i) {
+		miner_ctx *mx = px->mx[i];
+		if (!mx)
+			continue;
+
+		++j;
+
+		if (mx->closing || !mx->sctx.authorized)
+			continue;
+
+		if (mx->sctx.jobLen) {
+			if (px->sctx.diff != mx->sctx.diff)
+				mx->sctx.diffUpdated = 1;
+			if (strcmp(px->sctx.jobid, mx->sctx.jobid))
+				mx->sctx.jobUpdated = 1;
+			continue;
 		}
+
+		mx->sctx.jobLen = count;
+		uv_write(&mx->m_req, &mx->handle.stream, buf, count, miner_write_done);
+		mx->sctx.diff = px->sctx.diff;
+		strcpy(mx->sctx.jobid, px->sctx.jobid);
+	}
 	ASSERT(j == px->count);
 }
 
@@ -66,6 +83,9 @@ static void pool_close_done( uv_handle_t *handle )
 
 static void pool_close( pool_ctx *px, int retry )
 {
+	if (px->status == p_disconnecting)
+		return;
+
 	if (retry)
 		uv_timer_stop(&px->timer);
 	else
@@ -100,15 +120,14 @@ static void pool_read_done( uv_stream_t *stream, ssize_t nread,
 	const uv_buf_t *buf )
 {
 	int left_bytes;
-	size_t len;
+	unsigned int len;
 	uv_buf_t bufUpdate[2];
 
 	pool_ctx *px = CONTAINER_OF(stream, pool_ctx, handle.stream);
-	ASSERT(px->buf + px->pos == buf->base);
 
 	if (nread < 0) {
-		pr_err("Pool %s/%s:%hu disconnected", px->conf->host, px->addr,
-			px->conf->port);
+		pr_err("Pool %s/%s:%hu read error: %s", px->conf->host, px->addr,
+			px->conf->port, uv_strerror((int)nread));
 		pool_close(px, 1);
 		return;
 	} else if (!nread) {
@@ -117,7 +136,9 @@ static void pool_read_done( uv_stream_t *stream, ssize_t nread,
 		return;
 	}
 
-	len = px->pos + nread;
+	ASSERT(px->buf + px->pos == buf->base);
+
+	len = px->pos + (unsigned int)nread;
 	px->buf[len] = '\0';
 
 	left_bytes = stratum_parse(&px->sctx, px->buf, len);
@@ -177,10 +198,12 @@ void pool_connected( uv_connect_t *req, int status )
 		return;
 	}
 
-	pr_info("Pool %s/%s:%hu connected", px->conf->host, px->addr, px->conf->port);
+	pr_info("Pool %s/%s:%hu connected", px->conf->host, px->addr,
+		px->conf->port);
 
 	buf.base = px->buf;
-	buf.len = stratum_init(&px->sctx, px->buf, px->conf->miner, px->conf->passwd);
+	buf.len = stratum_init(&px->sctx, px->buf, px->conf->miner,
+		px->conf->passwd);
 	if (px->sctx.cx != px) {
 		px->sctx.cx = px;
 		px->sctx.diffstr = px->diff;
@@ -193,6 +216,108 @@ void pool_connected( uv_connect_t *req, int status )
 	px->pos = 0;
 	uv_read_start(&px->handle.stream, pool_alloc, pool_read_done);
 	uv_timer_start(&px->timer, pool_timeout, px->conf->timeout, 0);
+}
+
+static void share_submitted( uv_write_t *req, int status )
+{
+	miner_ctx *mx = CONTAINER_OF(req, miner_ctx, p_req);
+	pool_ctx *px = mx->px;
+	uv_buf_t buf;
+
+	if (unlikely(status)) {
+		if (mx->closing) {
+			mx->writeShareLen = mx->lastShareLen;
+			miner_clear(mx);
+			return;
+		}
+
+		if (mx->writeShareLen) {
+			ASSERT(mx->shareLen > mx->writeShareLen);
+
+			mx->shareLen -= mx->writeShareLen;
+			memmove(mx->share, mx->share + mx->writeShareLen, mx->shareLen);
+			mx->writeShareLen = 0;
+		}
+		mx->lastShareLen = 0;
+
+		pr_err("Pool %s/%s:%hu write error: %s", px->conf->host, px->addr,
+			px->conf->port, uv_strerror(status));
+		return;
+	}
+
+	if (mx->lastShareLen >= mx->shareLen) {
+		mx->lastShareLen = mx->writeShareLen = mx->shareLen = 0;
+		if (unlikely(mx->closing))
+			miner_clear(mx);
+		return;
+	}
+
+	if (unlikely(px->status != p_working)) {
+		mx->shareLen -= mx->lastShareLen;
+		if (!mx->closing)
+			memmove(mx->share, mx->share + mx->lastShareLen, mx->shareLen);
+		mx->lastShareLen = mx->writeShareLen = 0;
+		if (mx->closing)
+			miner_clear(mx);
+		return;
+	}
+
+	buf.base = mx->share + mx->lastShareLen;
+	buf.len = mx->shareLen - mx->lastShareLen;
+	mx->writeShareLen = mx->lastShareLen;
+	mx->lastShareLen = mx->shareLen;
+	uv_write(&mx->p_req, &px->handle.stream, &buf, 1, share_submitted);
+}
+
+void pool_submit_share( miner_ctx *mx, const char *miner, const char* jobid,
+		const char *xn, const char *ntime, const char *nonce )
+{
+	pool_ctx *px = mx->px;
+	char *p;
+	uv_buf_t buf;
+
+	if (mx->pxreconn && px->status == p_working)
+		mx->pxreconn = 0;
+
+	if (mx->shareLen > sizeof(mx->share) - 128) {
+		mx->sctx.sdiff -= mx->sctx.diff;
+		++mx->sctx.denyCount;
+
+		if (mx->writeShareLen < mx->lastShareLen) {
+			pr_warn("Miner %s/%s@%s:%hu is too fast, dropping share %u",
+				mx->miner, mx->agent, mx->addr, mx->port, mx->sctx.msgid);
+			return;
+		}
+
+		p = strchr(mx->share, '\n');
+		ASSERT(p);
+
+		buf.len = (unsigned long)(mx->share + mx->shareLen - p - 1);
+		memmove (mx->share, p + 1, buf.len);
+		mx->shareLen = buf.len;
+
+		pr_warn("Miner %s/%s@%s:%hu is too fast, dropping share",
+			mx->miner, mx->agent, mx->addr, mx->port);
+	}
+
+	px->sctx.sdiff += mx->sctx.diff;
+	if (++px->sctx.shareCount % 1000 == 0)
+		pr_info("Pool %s:%s:%hu got %u shares, refused %u, sdiff %g",
+			px->conf->host, px->addr, px->conf->port,
+			px->sctx.shareCount, px->sctx.denyCount, px->sctx.sdiff);
+
+	/* px->authtype */
+	mx->shareLen += stratum_create_share(&px->sctx, mx->share + mx->shareLen,
+		px->conf->miner, jobid, &xn[px->sctx.xn1size * 2], ntime, nonce);
+	if (mx->writeShareLen != mx->lastShareLen);
+	else if (px->status != p_working) mx->pxreconn = 1;
+	else {
+		buf.base = mx->share + mx->lastShareLen;
+		buf.len = mx->shareLen - mx->lastShareLen;
+		mx->lastShareLen = mx->shareLen;
+		uv_write(&mx->p_req, &px->handle.stream, &buf, 1,
+			share_submitted);
+	}
 }
 
 void pool_connect( pool_ctx *px, struct sockaddr *addr )
@@ -211,8 +336,8 @@ void pool_connect( pool_ctx *px, struct sockaddr *addr )
 			return;
 		}
 		px->timer.data = px;
-
 		px->sctx.cx = NULL;
+		px->ss = pool_submit_share;
 		memset(px->mx, 0, sizeof(px->mx));
 	} else {
 		addr = &s.addr;
@@ -223,8 +348,8 @@ void pool_connect( pool_ctx *px, struct sockaddr *addr )
 			uv_close((uv_handle_t *)&px->timer, NULL);
 
 			px->disc_time = 0;
-			pr_err("Invalid pool addr: %s/%s:%hu - %s", px->conf->host, px->addr,
-				px->conf->port, uv_strerror(err));
+			pr_err("Invalid pool addr: %s/%s:%hu - %s", px->conf->host,
+				px->addr, px->conf->port, uv_strerror(err));
 			return;
 		}
 	}
@@ -248,66 +373,6 @@ void pool_connect( pool_ctx *px, struct sockaddr *addr )
 		return;
 	}
 
-	pr_debug("connecting to %s/%s:%hu", px->conf->host, px->addr,
+	pr_debug("Connecting to %s/%s:%hu", px->conf->host, px->addr,
 		px->conf->port);
-}
-
-static void share_submitted( uv_write_t *req, int status )
-{
-	miner_ctx *mx = CONTAINER_OF(req, miner_ctx, write_req[2]);
-	pool_ctx *px = mx->px;
-	uv_buf_t buf;
-
-	if (status) {
-		pr_err("Pool %s/%s:%hu write error", px->conf->host, px->addr,
-			px->conf->port);
-		pool_close(px, 1);
-		return;
-	}
-
-	if (mx->lastShareLen == mx->shareLen) {
-		mx->shareLen = 0;
-		return;
-	}
-
-	ASSERT(mx->lastShareLen < mx->shareLen);
-
-	buf.base = mx->share + mx->lastShareLen;
-	buf.len = mx->shareLen - mx->lastShareLen;
-	mx->lastShareLen = mx->shareLen;
-	uv_write(&mx->write_req[2], &px->handle.stream, &buf, 1, share_submitted);
-}
-
-void pool_submit_share( miner_ctx *mx, const char *miner, const char* jobid,
-		const char *xn, const char *ntime, const char *nonce )
-{
-	pool_ctx *px = mx->px;
-	uv_buf_t buf;
-
-	if (mx->shareLen > sizeof(mx->share) - 128) {
-		mx->sctx.sdiff -= mx->sctx.diff;
-		--mx->sctx.shareCount;
-
-		pr_warn("Miner %s/%s@%s:%hu submitted too fast, dropping one share",
-			mx->miner, mx->agent, mx->addr, mx->port);
-		return;
-	}
-
-	px->sctx.sdiff += px->sctx.diff;
-	if (++px->sctx.shareCount % 1000 == 0)
-		pr_info("Pool %s:%s:%hu got %u shares, refused %u, sdiff %g",
-			px->conf->host, px->addr, px->conf->port,
-			px->sctx.shareCount, px->sctx.denyCount, px->sctx.sdiff);
-
-	buf.base = mx->share + mx->shareLen;
-	buf.len = stratum_create_share(&px->sctx, buf.base, miner, jobid,
-		&xn[px->sctx.xn1size * 2], ntime, nonce);
-
-	if (mx->shareLen || px->status != p_working)
-		mx->shareLen += buf.len;
-	else {
-		mx->lastShareLen = mx->shareLen;
-		uv_write(&mx->write_req[2], &px->handle.stream, &buf, 1,
-			share_submitted);
-	}
 }

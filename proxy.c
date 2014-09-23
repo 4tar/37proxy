@@ -21,7 +21,9 @@
  */
 
 #include "defs.h"
+#ifndef WIN32
 #include <netinet/in.h>  /* INET6_ADDRSTRLEN */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,7 +123,7 @@ pool_ctx *pool_pickup( proxy_config *conf )
 
 void attach_miner_to_pool( pool_ctx *px, miner_ctx *mx )
 {
-	unsigned int i, j;
+	unsigned short i, j;
 
 	mx->px = px;
 
@@ -132,22 +134,34 @@ void attach_miner_to_pool( pool_ctx *px, miner_ctx *mx )
 	++px->count;
 
 	memcpy(&mx->sctx, &px->sctx, STRATUM_SESSION_SIZE);
-	memset(&mx->sctx + STRATUM_SESSION_SIZE, 0,
+	memset(STRATUM_SESSION_POS(&mx->sctx), 0,
 		sizeof(mx->sctx) - STRATUM_SESSION_SIZE);
 
 	mx->sctx.xn1size += 2;
 	mx->sctx.xn2size -= 2;
-	sprintf(&mx->sctx.xn1[px->sctx.xn1size * 2], "%04x", i & 0xFFFF);
+	mx->sctx.isServer = mx->sctx.authorized = 0;
+	mx->sctx.jobUpdated = mx->sctx.diffUpdated = 0;
+	mx->sctx.sdiff = mx->sctx.shareCount = mx->sctx.denyCount = 0;
+	mx->sctx.jobLen = 0;
+#ifdef WORDS_BIGENDIAN
+	sprintf(&mx->sctx.xn1[px->sctx.xn1size * 2], "%04x", i);
+#else
+	sprintf(&mx->sctx.xn1[px->sctx.xn1size * 2], "%02x%02x", i & 0xff, i >> 8);
+#endif
+	mx->sctx.cx = mx;
+
+	mx->pxreconn = 0;
+	mx->writeShareLen = mx->lastShareLen = mx->shareLen = 0;
 }
 
-void detach_miner_from_pool( pool_ctx *px, miner_ctx *mx )
+void detach_miner_from_pool( miner_ctx *mx )
 {
 	unsigned short i;
+	pool_ctx *px = mx->px;
 
 	mx->px = NULL;
 
 	hex2bin((unsigned char *)&i, &mx->sctx.xn1[px->sctx.xn1size * 2], 4);
-
 	ASSERT(px->mx[i] == mx);
 	px->mx[i] = NULL;
 	--px->count;
@@ -176,7 +190,7 @@ int proxy_run( proxy_config *conf )
 	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = 0;
 
-	for (i = 0; i < conf->count; ++i) {
+	for (i = 0; i < (int)conf->count; ++i) {
 		p_state[i].conf = &conf->pools[i];
 		err = uv_getaddrinfo(conf->loop, &p_state[i].gar_req, pool_resolved,
 				conf->pools[i].host, NULL, &hints);
@@ -204,7 +218,7 @@ int proxy_run( proxy_config *conf )
 
 	uv_loop_delete(conf->loop);
 
-	for (i = 0; i < conf->count; ++i)
+	for (i = 0; i < (int)conf->count; ++i)
 		free(conf->pools[i].px);
 
 	return 0;

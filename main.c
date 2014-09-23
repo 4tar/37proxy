@@ -24,16 +24,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-const char *proxy_name = "37proxy";
-const char *proxy_ver = "2";
+const char *app_name = "37proxy";
 
 log_level log_level_t = -1;
-time_t start_time;
+uint64_t start_time;
 
 static void Usage()
 {
-	fprintf(stderr, "Usage: %s [-c config_file] [-h]\n", proxy_name);
+	fprintf(stderr, "Usage: %s [-c config_file] [-h]\n", app_name);
 	exit(1);
 }
 
@@ -43,9 +43,13 @@ int main( int argc, char *argv[] )
 	char *config_file = "37proxy.conf";
 	int i = 0;
 
-	start_time = time(NULL) - uv_now((uv_default_loop())) / 1000;
+	start_time = time64(NULL) * 1000 - uv_now(uv_default_loop());
 
 	setbuf(stderr, NULL);
+
+#ifndef WIN32
+	signal(SIGPIPE, SIG_IGN);
+#endif
 
 	while (++i < argc) {
 		if (!strcmp(argv[i], "-c") && ++i < argc) {

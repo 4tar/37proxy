@@ -22,12 +22,17 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef WIN32
+#define alloca		_alloca
+#define snprintf	_snprintf
+#else
 #include <alloca.h>
+#endif
 #include <jansson.h>
 #include "defs.h"
 #include "stratum.h"
 
-extern const char *proxy_name, *proxy_ver;
+extern const char *app_name;
 
 /* caller ensures the buf has enough room for subscribe & authorize requests */
 int stratum_init( stratum_ctx *sctx, char *buf, const char* user,
@@ -43,18 +48,18 @@ int stratum_init( stratum_ctx *sctx, char *buf, const char* user,
 	sctx->authorized = 0;
 
 	return sprintf(buf,
-		"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"%s/%s\"]}"
+		"{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"%s/%g\"]}"
 		"\n"
 		"{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"%s\",\"%s\"]}"
 		"\n"
 		,
-		proxy_name, proxy_ver, user, passwd);
+		app_name, (double)PROXY_VER, user, passwd);
 }
 
-size_t stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
+int stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
 	const char *jobid, const char *xn2, const char *ntime, const char* nonce )
 {
-	size_t len = sprintf(share,
+	int len = sprintf(share,
 		"{\"method\":\"mining.submit\","
 		"\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],"
 		"\"id\":%u}\n",
@@ -65,7 +70,7 @@ size_t stratum_create_share( stratum_ctx *sctx, char *share, const char *miner,
 	return len;
 }
 
-size_t stratum_build_reconnect( stratum_ctx *sctx, char *reconn )
+int stratum_build_reconnect( stratum_ctx *sctx, char *reconn )
 {
 	miner_ctx *mx = sctx->cx;
 	proxy_config *pxx = mx->pxx;
@@ -86,7 +91,7 @@ static const char *get_session_id( json_t *val, char *sid, size_t size )
 	if (!arr_val || !json_is_array(arr_val))
 		return NULL;
 
-	n = json_array_size(arr_val);
+	n = (int)json_array_size(arr_val);
 	for (i = 0; i < n; ++i) {
 		json_t *arr = json_array_get(arr_val, i);
 		if (!arr || !json_is_array(arr))
@@ -116,8 +121,8 @@ static unsigned int get_extranonce1( json_t *val, char *xn1, size_t size )
 	const char *s = json_string_value(json_array_get(val, 1));
 	if (!s || !(len = strlen(s)) || (len % 2) || len >= size)
 		return 0;
-	memcpy(xn1, s, len);
-	return len / 2;
+	memcpy(xn1, s, len + 1);
+	return (unsigned int)len / 2;
 }
 
 static json_t *get_result( json_t *val )
@@ -163,7 +168,7 @@ static int setup_context( stratum_ctx *sctx, json_t *val )
 		return -5;
 	}
 
-	sctx->xn2size = json_integer_value(json_array_get(res_val, 2));
+	sctx->xn2size = (int)json_integer_value(json_array_get(res_val, 2));
 	if (sctx->xn2size <= 0 || sctx->xn2size > 100) {
 		pr_err("Stratum subscribe rep error: invalid extranonce2size");
 		return -6;
@@ -195,27 +200,29 @@ static int parse_submit_response( stratum_ctx *sctx, json_t *val,
 {
 	if (!(get_result(val))) {
 		pool_ctx *px = sctx->cx;
-		pr_warn("Pool %s/%s:%hu refuse share submission %llu", px->conf->host,
-			px->addr, px->conf->port, id);
+		if (px) {
+			pr_warn("Pool %s/%s:%hu refuse share submission %llu",
+				px->conf->host, px->addr, px->conf->port, id);
 
-		sctx->sdiff -= sctx->diff;
-		++sctx->denyCount;
+			sctx->sdiff -= sctx->diff;
+			++sctx->denyCount;
+		}
 	}
 
 	return 0;
 }
 
 static int check_coinbase( stratum_ctx *sctx, unsigned char *coinbase,
-	size_t cbsize )
+	unsigned int cbsize )
 {
 	int i;
-	size_t pos;
-	unsigned long len, total, target, amount, script_len;
+	uint16_t pos;
+	uint64_t len, total, target, amount, script_len;
 	int found_target = 0, ret = -4;
 	pool_config *conf;
 
-	if (cbsize < 62) {
-		pr_err("Coinbase check: invalid length: %lu", cbsize);
+	if (cbsize < 62 || cbsize > 1024) {
+		pr_err("Coinbase check: invalid length: %u", cbsize);
 		return -1;
 	}
 	pos = 4;
@@ -248,12 +255,15 @@ incomplete_cb:
 	}
 	pos += i;
 
-	conf = ((pool_ctx *)(sctx->cx))->conf;
+	if (likely(sctx->cx))
+		conf = ((pool_ctx *)(sctx->cx))->conf;
+	else
+		conf = NULL;
 
 	while (len-- > 0) {
 		char addr[64];
 
-		if (cbsize <= pos + 8) {
+		if ((uint16_t)cbsize <= pos + 8) {
 			ret = -6;
 			goto incomplete_cb;
 		}
@@ -270,35 +280,34 @@ incomplete_cb:
 		}
 		pos += i;
 
-		i = script_to_address(addr, sizeof(addr), coinbase + pos, script_len,
-				0);
+		i = script_to_address(addr, sizeof(addr), coinbase + pos,
+				(unsigned int)script_len, 0);
 		if (i && i <= sizeof(addr)) {
-			i = strcmp(addr, conf->cbaddr);
-			if (!i) {
+			if (likely(conf) && !(i = strcmp(addr, conf->cbaddr))) {
 				found_target = 1;
 				target += amount;
 			}
-			pr_info("Coinbase output: %10lu -- %34s%c", amount, addr,
+			pr_info("Coinbase output: %10llu -- %34s%c", amount, addr,
 				i ? '\0' : '*');
 		} else {
 			char *hex = addr;
 			if (script_len * 2 >= sizeof(addr))
 				hex = alloca(script_len * 2 + 1);
-			bin2hex(hex, coinbase + pos, script_len, 0);
-			pr_info("Coinbase output: %10lu PK %34s", amount, hex);
+			bin2hex(hex, coinbase + pos, (size_t)script_len, 0);
+			pr_info("Coinbase output: %10llu PK %34s", amount, hex);
 		}
 
-		pos += script_len;
+		pos += (unsigned int)script_len;
 	}
-	if (total < conf->cbtotal) {
-		pr_err("Coinbase check: lopsided total output amount = %lu, "
-			"expecting >=%ld", total, conf->cbtotal);
+	if (likely(conf) && total < conf->cbtotal) {
+		pr_err("Coinbase check: lopsided total output amount = %llu, "
+			"expecting >=%llu", total, conf->cbtotal);
 		return -8;
 	}
-	if (conf->cbaddr[0]) {
+	if (likely(conf) && conf->cbaddr[0]) {
 		if (conf->cbperc && 
 			!(total && (float)((double)target / total) >= conf->cbperc)) {
-			pr_err("Coinbase check: lopsided target/total = %g(%lu/%lu), "
+			pr_err("Coinbase check: lopsided target/total = %g(%llu/%llu), "
 				"expecting >=%g", (total ? (double)target / total : 0),
 				target, total, conf->cbperc);
 			return -9;
@@ -308,14 +317,17 @@ incomplete_cb:
 		}
 	}
 
-	if (cbsize < pos + 4) {
+	pos += 4;
+	if (cbsize < pos) {
 		pr_err("Coinbase check: No room for locktime");
 		return -11;
+	} else if (cbsize > pos) {
+		pr_err("Coinbase check: extra data %u bytes", cbsize - pos);
+		return -12;
 	}
-	pos += 4;
 
-	pr_debug("Coinbase: (size, pos, target, total) = (%lu, %lu, %lu, %lu)",
-		cbsize, pos, target, total);
+	pr_debug("Coinbase: (size, target, total) = (%u, %llu, %llu)", cbsize,
+		target, total);
 
 	return 0;
 }
@@ -324,7 +336,7 @@ int parse_job( stratum_ctx *sctx, json_t *val )
 {
 	const char *s;
 	unsigned char cb[256], *p;
-	size_t len;
+	unsigned int len;
 
 	if (!val || !json_is_array(val) || json_array_size(val) != 9 ||
 		!json_is_boolean(json_array_get(val, 8))) {
@@ -339,7 +351,7 @@ int parse_job( stratum_ctx *sctx, json_t *val )
 	}
 
 	s = json_string_value(json_array_get(val, 0));
-	if (!s || !(len = strlen(s)) || len >= sizeof(sctx->jobid)) {
+	if (!s || !(len = (unsigned int)strlen(s)) || len >= sizeof(sctx->jobid)) {
 		pr_err("Parse job error: invalid job id");
 		return -3;
 	}
@@ -348,23 +360,31 @@ int parse_job( stratum_ctx *sctx, json_t *val )
 		memcpy(sctx->jobid, s, len + 1);
 	}
 
-	s = json_string_value(json_array_get(val, 2));
-	if (!s || !(len = strlen(s)) || len % 2) {
-		pr_err("Parse job error: invalid coinbase first half");
+	s = json_string_value(json_array_get(val, 7));
+	if (!s || 8 != strlen(s)) {
+		pr_err("Parse job error: invalid ntime");
 		return -4;
+	}
+	hex2bin(cb, s, 8);
+	sctx->ntime = be32toh(*(uint32_t *)cb);
+
+	s = json_string_value(json_array_get(val, 2));
+	if (!s || !(len = (unsigned int)strlen(s)) || len % 2) {
+		pr_err("Parse job error: invalid coinbase first half");
+		return -5;
 	}
 	hex2bin(cb, s, len);
 	p = cb + len / 2 + sctx->xn1size + sctx->xn2size;
 
 	s = json_string_value(json_array_get(val, 3));
-	if (!s || !(len = strlen(s)) || len % 2) {
+	if (!s || !(len = (unsigned int)strlen(s)) || len % 2) {
 		pr_err("Parse job error: invalid coinbase second half");
-		return -5;
+		return -6;
 	}
 	hex2bin(p, s, len);
 
-	if (check_coinbase(sctx, cb, p - cb + len / 2))
-		return -6;
+	if (check_coinbase(sctx, cb, (unsigned int)(p - cb) + len / 2))
+		return -7;
 
 	return 0;
 }
@@ -385,7 +405,7 @@ int get_diff( stratum_ctx *sctx, json_t *val )
 
 	diff = sctx->diff;
 	if (json_is_integer(val))
-		sctx->diff = json_integer_value(val);
+		sctx->diff = (double)json_integer_value(val);
 	else
 		sctx->diff = json_real_value(val);
 	if (sctx->diff <= 0) {
@@ -417,7 +437,7 @@ static int do_reconnect( stratum_ctx *sctx, json_t *val )
 		return -2;
 	}
 
-	port = json_integer_value(json_array_get(val, 1));
+	port = (int)json_integer_value(json_array_get(val, 1));
 	if (port < 0 || port > 65535) {
 		pr_err("Reconect req error: invalid port");
 		return -3;
@@ -464,7 +484,7 @@ static int parse_share( stratum_ctx *sctx, json_t *val )
 {
 	miner_ctx *mx;
 	const char *miner, *jobid, *xn2, *ntime, *nonce;
-	char xn[128];
+	char xn[64];
 	int ret = 0;
 
 	if (!val || !json_is_array(val) || 5 != json_array_size(val)) {
@@ -482,16 +502,18 @@ static int parse_share( stratum_ctx *sctx, json_t *val )
 		pr_err("Parse share error: lack of share elements");
 		return -2;
 	}
+	if (sizeof(xn) == snprintf(xn, sizeof(xn), "%s%s", sctx->xn1, xn2)) {
+		pr_err("Parse share error: too long extranonce");
+		return -3;
+	}
 
 	sctx->sdiff += sctx->diff;
 	++sctx->shareCount;
 
-	mx = sctx->cx;
+	if ((mx = sctx->cx))
+		mx->px->ss(mx, miner, jobid, xn, ntime, nonce);
 
-	sprintf(xn, "%s%s", sctx->xn1, xn2);
-	pool_submit_share(mx, miner, jobid, xn, ntime, nonce);
-
-	sctx->outbufLen += sprintf(mx->outbuf + sctx->outbufLen,
+	sctx->jobLen += sprintf(mx->outbuf + sctx->jobLen,
 		"{\"id\":%u,\"result\":true,\"error\":null}\n",
 		sctx->msgid);
 
@@ -503,7 +525,7 @@ static int send_txnlist( stratum_ctx *sctx, json_t *val )
 	/* no txn list support in this edition. 
 	   Instead of sending the below error response, just ignore now. */
 	/*
-	sctx->outbufLen += sprintf(mx->outbuf + sctx->outbufLen,
+	sctx->jobLen += sprintf(mx->outbuf + sctx->jobLen,
 		"{\"id\":%d,\"result\":false,\"error\":[26,\"no-txlist\",null]}\n",
 		sctx->msgid);
 	*/
@@ -523,14 +545,14 @@ static int parse_subscribe( stratum_ctx *sctx, json_t *val )
 		return -1;
 	}
 
-	if (!(len = strlen(msg)) || len >= sizeof(mx->agent)) {
+	if (!(len = (int)strlen(msg)) || len >= sizeof(mx->agent)) {
 		pr_err("Stratum subscribe req error: too long agent info");
 		return -2;
 	}
 
 	memcpy(mx->agent, msg, len + 1);
 
-	sctx->outbufLen += sprintf(mx->outbuf + sctx->outbufLen,
+	sctx->jobLen += sprintf(mx->outbuf + sctx->jobLen,
 		"{\"id\":1,\"result\":[[[\"mining.set_difficulty\",\"\"],"
 		"[\"mining.notify\",\"%s\"]],\"%s\",%d],\"error\":null}\n"
 		"%s%s",
@@ -551,15 +573,17 @@ static int parse_authorize( stratum_ctx *sctx, json_t *val )
 		return -1;
 	}
 
-	if (!(len = strlen(msg)) || len >= sizeof(mx->miner)) {
+	if (!(len = (int)strlen(msg)) || len >= sizeof(mx->miner)) {
 		pr_err("Stratum subscribe req error: too long miner name");
 		return -2;
 	}
 
 	memcpy(mx->miner, msg, len + 1);
 
-	sctx->outbufLen += sprintf(mx->outbuf + sctx->outbufLen,
+	sctx->jobLen += sprintf(mx->outbuf + sctx->jobLen,
 		"{\"id\":2,\"result\":true,\"error\":null}\n");
+
+	sctx->authorized = 1;
 
 	return 0;
 }
@@ -575,17 +599,19 @@ int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len )
 	json_t *val = NULL, *meth_val, *id_val;
 	json_error_t err;
 	const char *method;
-	size_t size;
+	unsigned int size;
 	unsigned long long id;
 	int r = 0;
 
 	for (; !r && len > 0 && (c = strchr(buf, '\n')); len -= size, buf = c) {
-		size = c - buf + 1;
+		size = (unsigned int)(c - buf + 1);
 		if (size > len)
 			break;
 
 		*c++ = '\0';
-		if (sctx->isServer) {
+		if (unlikely(!sctx->cx))
+			pr_debug("stratum_parse: %s", buf);
+		else if (sctx->isServer) {
 			pool_ctx *px = sctx->cx;
 			pr_debug("<%s/%s:%hu: %s", px->conf->host, px->addr,
 				px->conf->port, buf);
@@ -612,12 +638,12 @@ int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len )
 				if (!strcmp(method, "mining.notify")) {
 					if (parse_job(sctx, json_object_get(val, "params")))
 						r = -3;
-					else if (sctx->jobUpdated)
+					else if (sctx->jobUpdated && sctx->jobstr)
 						copy_message(sctx->jobstr, sctx->jobLen, buf, size);
 				} else if (!strcmp(method, "mining.set_difficulty")) {
 					if (get_diff(sctx, json_object_get(val, "params")))
 						r = -4;
-					else if (sctx->diffUpdated)
+					else if (sctx->diffUpdated && sctx->diffstr)
 						copy_message(sctx->diffstr, sctx->diffLen, buf, size);
 				} else if (!strcmp(method, "client.reconnect")) {
 					do_reconnect(sctx, json_object_get(val, "params"));
@@ -638,7 +664,7 @@ int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len )
 			} else {
 				id_val = json_object_get(val, "id");
 				if (!id_val || json_is_null(id_val) ||
-					!(sctx->msgid = json_integer_value(id_val))) {
+					!(sctx->msgid = (unsigned int)json_integer_value(id_val))) {
 					pr_err("JSON-RPC miner error: null id");
 					r = -10;
 				} else if (!strcmp(method, "mining.submit")) {
