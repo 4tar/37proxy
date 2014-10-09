@@ -22,7 +22,6 @@
 
 #include "defs.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -32,17 +31,18 @@ char *arg0, ip[INET6_ADDRSTRLEN] = "127.0.0.1", user[16] = "";
 unsigned short port = 3737;
 log_level log_level_t = level_info;
 uint64_t start_time;
-unsigned int idx = 0, count = 4096, idle = 0;
+unsigned int idx = 0, c_count = 4096, idle = 0;
 uv_loop_t *loop;
-unsigned int timeout = 5000, interval = 0;
+unsigned int timeout = 5000, interval = 0, waitrep = 1;
+unsigned char shareCount = 1;
 
 typedef struct client_ctx {
 	unsigned int id;
 	char bind[INET6_ADDRSTRLEN];
 	unsigned short port;
 	union {
-		uv_connect_t conn_req;
-		uv_write_t write_req;
+		uv_connect_t conn;
+		uv_write_t write;
 	} req;
 	union {
 		uv_handle_t h;
@@ -51,9 +51,9 @@ typedef struct client_ctx {
 	} handle;
 	uv_timer_t timer;
 	stratum_ctx sctx;
-	uint64_t conn_time;
+	uint64_t conn_time, log_time;
 	unsigned int rpos:12, wpos:12, wlen:9, connected:1, initialized:1;
-	char rbuf[2048], wbuf[256];
+	char rbuf[2048], wbuf[2048];
 } client_ctx;
 
 
@@ -61,14 +61,15 @@ void proxy_connect( client_ctx *cx );
 
 static void client_close_done( uv_handle_t *handle )
 {
-	uint64_t elapsed;
+	unsigned int count;
 	client_ctx *cx = handle->data;
 	ASSERT(handle == &cx->handle.h);
 
-	if (30 * 1000 < (elapsed = uv_now(loop) - cx->conn_time)) {
-		unsigned int count = cx->sctx.msgid - 2;
-		pr_info("Client %u closed, %u share submitted, %g/s", cx->id,
-			count, (double)count * 1000 / elapsed);
+	if ((cx->sctx.msgid - 3)) {
+		count = cx->sctx.repid - 2;
+		pr_info("Client %u closed, %u shares submitted, %u responses received,"
+			"avg %g/s", cx->id, cx->sctx.msgid - 3, count,
+			(double)count * 1000 / (uv_now(loop) - cx->conn_time));
 	}
 
 	proxy_connect(cx);
@@ -100,23 +101,34 @@ static void client_submit_share( client_ctx *cx )
 {
 	char miner[32], xn2[17], ntime[9], nonce[9];
 	uv_buf_t buf;
+	unsigned char i;
+	unsigned int count = cx->sctx.repid - 2;
+	uint64_t now = uv_now(loop);
 
 	sprintf(miner, "%s.%u", user, cx->id);
 	sprintf(xn2, "%0*x", cx->sctx.xn2size * 2, rand());
 	sprintf(ntime, "%08x", cx->sctx.ntime);
-	sprintf(nonce, "%08x", rand());
 
-	if (interval || cx->sctx.msgid % 10000 == 0)
+	if (now - cx->log_time > 1000 * (c_count > 10 ? 10 : c_count)) {
 		pr_info("Client %u to submit share %u/%s/%u, avgs %g/s", cx->id,
 			cx->sctx.msgid, cx->sctx.jobid, cx->sctx.ntime,
-			(double)(cx->sctx.msgid-2)*1000 / (uv_now(loop)-cx->conn_time));
+			(double)count * 1000 / (now - cx->conn_time));
+		cx->log_time = now;
+	}
+
+	ASSERT(cx->wlen == 0);
+	for (i = 0; i < shareCount; ++i) {
+		sprintf(nonce, "%08x", rand());
+		cx->wlen += stratum_create_share(&cx->sctx, cx->wbuf + cx->wlen,
+			miner, cx->sctx.jobid, xn2, ntime, nonce);
+	}
+	pr_debug("<Client %u/%u/%u: %s", cx->id, cx->sctx.msgid, cx->wlen,
+		cx->wbuf);
 
 	buf.base = cx->wbuf;
-	buf.len = cx->wlen = stratum_create_share(&cx->sctx, cx->wbuf,
-		miner, cx->sctx.jobid, xn2, ntime, nonce);
-
+	buf.len = cx->wlen;
 	cx->wpos = cx->rpos;
-	uv_write(&cx->req.write_req, &cx->handle.stream, &buf, 1, client_write_done);
+	uv_write(&cx->req.write, &cx->handle.stream, &buf, 1, client_write_done);
 	uv_timer_start(&cx->timer, client_timeout, timeout, 0);
 }
 
@@ -141,7 +153,7 @@ static void client_read_done( uv_stream_t *stream, ssize_t nread,
 	client_ctx *cx = CONTAINER_OF(stream, client_ctx, handle.stream);
 
 	if (nread < 0) {
-		pr_err("Client %u read error %s", cx->id, uv_strerror(nread));
+		pr_err("Client %u read error %s", cx->id, uv_strerror((int)nread));
 		client_close(cx);
 		return;
 	} else if (!nread && bufDone) {
@@ -149,7 +161,7 @@ static void client_read_done( uv_stream_t *stream, ssize_t nread,
 		return;
 	}
 
-	cx->rpos += nread;
+	cx->rpos += (unsigned int)nread;
 
 	left_bytes = stratum_parse(&cx->sctx, cx->rbuf, cx->rpos);
 	if (left_bytes < 0 || left_bytes >= sizeof(cx->rbuf)) {
@@ -167,8 +179,15 @@ static void client_read_done( uv_stream_t *stream, ssize_t nread,
 		return;
 	}
 
-	if (!cx->sctx.authorized || !cx->sctx.jobid[0])
+	if (!cx->sctx.authorized || !cx->sctx.jobid[0]) {
+		pr_debug("Client %u hasn't get authorized", cx->id);
 		return;
+	}
+	if (waitrep && cx->sctx.repid < cx->sctx.msgid - 1) {
+		pr_debug("Client %u is pending on message: %u/%u", cx->id,
+			cx->sctx.repid, cx->sctx.msgid);
+		return;
+	}
 
 	if (interval)
 		uv_timer_start(&cx->timer, client_s_timeout, rand() % interval, 0);
@@ -178,7 +197,7 @@ static void client_read_done( uv_stream_t *stream, ssize_t nread,
 
 static void client_write_done( uv_write_t *req, int status )
 {
-	client_ctx *cx = CONTAINER_OF(req, client_ctx, req.write_req);
+	client_ctx *cx = CONTAINER_OF(req, client_ctx, req.write);
 
 	if (status) {
 		pr_warn("Client %u write error", cx->id);
@@ -196,7 +215,7 @@ static void client_write_done( uv_write_t *req, int status )
 
 void proxy_connected( uv_connect_t *req, int status )
 {
-	client_ctx *cx = CONTAINER_OF(req, client_ctx, req.conn_req);
+	client_ctx *cx = CONTAINER_OF(req, client_ctx, req.conn);
 	char miner[32];
 	uv_buf_t buf;
 	union {
@@ -225,7 +244,7 @@ void proxy_connected( uv_connect_t *req, int status )
 	}
 
 	cx->connected = 1;
-	cx->conn_time = uv_now(loop);
+	cx->log_time = cx->conn_time = uv_now(loop);
 
 	pr_info("Client %u connected", cx->id);
 
@@ -237,7 +256,7 @@ void proxy_connected( uv_connect_t *req, int status )
 	buf.len = cx->wlen = stratum_init(&cx->sctx, cx->wbuf, miner, "");
 
 	cx->wpos = cx->rpos = 0;
-	uv_write(&cx->req.write_req, &cx->handle.stream, &buf, 1,
+	uv_write(&cx->req.write, &cx->handle.stream, &buf, 1,
 		client_write_done);
 	uv_timer_start(&cx->timer, client_timeout, timeout, 0);
 
@@ -276,7 +295,7 @@ void proxy_connect( client_ctx *cx )
 		return;
 	}
 
-	if ((err = uv_tcp_connect(&cx->req.conn_req, &cx->handle.tcp, &s.addr,
+	if ((err = uv_tcp_connect(&cx->req.conn, &cx->handle.tcp, &s.addr,
 				proxy_connected))) {
 		pr_err("Client %u connect failed: %s", cx->id, uv_strerror(err));
 		uv_timer_start(&cx->timer, client_timeout, 1000, 0);
@@ -298,15 +317,16 @@ static void on_idle( uv_idle_t *idler )
 	cx->initialized = 0;
 	proxy_connect(cx);
 
-	if (idx == count) {
+	if (idx == c_count) {
 		uv_idle_stop(idler);
-		pr_info("%u clients created, stop the idler", count);
+		pr_info("%u clients created, stop the idler", c_count);
 	}
 }
 
 static void Usage( const char *arg0 )
 {
-	fprintf(stderr, "Usage: %s -p pool_ip pool_port -u user -c count -t timeout -i interval\n", arg0);
+	fprintf(stderr, "Usage: %s -p pool_ip pool_port -u user -l level -n nowait "
+		"-c count -t timeout -i interval -s shareCountInOneTime\n", arg0);
 	exit(1);
 }
 
@@ -327,15 +347,27 @@ int main( int argc, char *argv[] )
 	while (++i < argc) {
 		if (!strcmp(argv[i], "-p") && ++i < argc - 1) {
 			strncpy(ip, argv[i++], sizeof(ip));
-			port = atoi(argv[i]);
-			continue;
+			if ((port = atoi(argv[i])))
+				continue;
 		} else if (!strcmp(argv[i], "-u") && ++i < argc) {
 			strncpy(user, argv[i], sizeof(user));
 			user[sizeof(user) - 1] = '\0';
 			continue;
+		} else if (!strcmp(argv[i], "-l") && ++i < argc) {
+			log_level_t = -1;
+			if (!strcmp(argv[i], "debug"))
+				log_level_t = level_debug;
+			else if (!strcmp(argv[i], "info"))
+				log_level_t = level_info;
+			else if (!strcmp(argv[i], "warn"))
+				log_level_t = level_warn;
+			else if (!strcmp(argv[i], "error"))
+				log_level_t = level_err;
+			if ((int)log_level_t != -1)
+				continue;
 		} else if (!strcmp(argv[i], "-c") && ++i < argc) {
-			count = atoi(argv[i]);
-			if (count)
+			c_count = atoi(argv[i]);
+			if (c_count)
 				continue;
 		} else if (!strcmp(argv[i], "-t") && ++i < argc) {
 			timeout = atoi(argv[i]) * 1000;
@@ -345,18 +377,30 @@ int main( int argc, char *argv[] )
 			interval = atoi(argv[i]) * 1000;
 			if (interval)
 				continue;
+		} else if (!strcmp(argv[i], "-s") && ++i < argc) {
+			shareCount = atoi(argv[i]);
+			if (shareCount)
+				continue;
+		} else if (!strcmp(argv[i], "-n")) {
+			waitrep = 0;
+			continue;
 		}
+
 		Usage(arg0);
 	}
 	if (!user[0])
 		strcpy(user, app_name);
 	if (timeout < 2 * interval) {
 		pr_err("Timeout value should not be less than 2 times of interval");
-		return 1;
+		return 2;
+	}
+	if (shareCount > 15) {
+		pr_err("Should not submit more than 15 shares in one time");
+		return 3;
 	}
 
 	pr_info("To do stress test against %s:%hu with %u clients",
-		ip, port, count);
+		ip, port, c_count);
 
 	uv_idle_init(loop, &idler);
 	uv_idle_start(&idler, on_idle);

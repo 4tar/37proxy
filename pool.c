@@ -64,6 +64,7 @@ static void pool_broadcast( pool_ctx *px, uv_buf_t buf[], unsigned int count )
 		uv_write(&mx->m_req, &mx->handle.stream, buf, count, miner_write_done);
 		mx->sctx.diff = px->sctx.diff;
 		strcpy(mx->sctx.jobid, px->sctx.jobid);
+		mx->sctx.ntime = px->sctx.ntime;
 	}
 	ASSERT(j == px->count);
 }
@@ -101,7 +102,7 @@ static void pool_timeout( uv_timer_t *timer )
 	pool_ctx *px = CONTAINER_OF(timer, pool_ctx, timer);
 
 	if (px->status == p_initializing || px->status == p_working) {
-		pr_err("Pool %s/%s:%hu timeout %d", px->conf->host, px->addr,
+		pr_warn("Pool %s/%s:%hu timeout %d", px->conf->host, px->addr,
 			px->conf->port, px->conf->timeout);
 
 		pool_close(px, 1);
@@ -126,7 +127,7 @@ static void pool_read_done( uv_stream_t *stream, ssize_t nread,
 	pool_ctx *px = CONTAINER_OF(stream, pool_ctx, handle.stream);
 
 	if (nread < 0) {
-		pr_err("Pool %s/%s:%hu read error: %s", px->conf->host, px->addr,
+		pr_warn("Pool %s/%s:%hu read error: %s", px->conf->host, px->addr,
 			px->conf->port, uv_strerror((int)nread));
 		pool_close(px, 1);
 		return;
@@ -162,8 +163,7 @@ static void pool_read_done( uv_stream_t *stream, ssize_t nread,
 		pr_info("Pool %s/%s:%hu start working with stratum context: "
 			"xn1 = %d/%s xn2 = %d sid = %s",
 			px->conf->host, px->addr, px->conf->port,
-			px->sctx.xn1size, px->sctx.xn1, px->sctx.xn2size, px->sctx.sid
-		);
+			px->sctx.xn1size, px->sctx.xn1, px->sctx.xn2size, px->sctx.sid);
 	}
 
 	len = 0;
@@ -306,7 +306,6 @@ void pool_submit_share( miner_ctx *mx, const char *miner, const char* jobid,
 			px->conf->host, px->addr, px->conf->port,
 			px->sctx.shareCount, px->sctx.denyCount, px->sctx.sdiff);
 
-	/* px->authtype */
 	mx->shareLen += stratum_create_share(&px->sctx, mx->share + mx->shareLen,
 		px->conf->miner, jobid, &xn[px->sctx.xn1size * 2], ntime, nonce);
 	if (mx->writeShareLen != mx->lastShareLen);
@@ -336,9 +335,7 @@ void pool_connect( pool_ctx *px, struct sockaddr *addr )
 			return;
 		}
 		px->timer.data = px;
-		px->sctx.cx = NULL;
 		px->ss = pool_submit_share;
-		memset(px->mx, 0, sizeof(px->mx));
 	} else {
 		addr = &s.addr;
 

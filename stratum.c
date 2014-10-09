@@ -697,10 +697,10 @@ int stratum_parse( stratum_ctx *sctx, char *buf, unsigned int len )
 					r = -18;
 			} else if (id == 1) {
 				if (setup_context(sctx, val))
-					return -19;
+					r = -19;
 			} else if (id == 2) {
 				if (parse_authorize_result(sctx, val))
-					return -20;
+					r = -20;
 			} else
 				ASSERT(0);
 		} else {
