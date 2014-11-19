@@ -24,6 +24,7 @@ The stratum proxy designed for large mining farm featuring bandwidth saving, sta
 * 提升矿场整体效率和安全性
   * 使用37proxy后，矿场内部矿机只在局域网内与37proxy通信，极大地缓解了网络IO延迟，减少因此给矿机性能带来的损失。
   * 同时，由于37proxy的部署，矿场可对内部网络部署进行优化，将出口节点限制在37proxy所在节点上，而把矿机对外全部隐藏，减少外部网络攻击的接触面。
+  * 37proxy完全集成了37pool开发团队为bfgminer/cgminer提交的矿池下发任务实时校验补丁（bfgminer：https://github.com/luke-jr/bfgminer/pull/540，cgminer：https://github.com/ckolivas/cgminer/pull/638），确保矿场算力不被矿池或黑客窃取挪为它用，是矿场连接PPLNS类型矿池的绝佳选择。
 
 * 负载优化和算力保障
   * 37proxy免费增强版具备的矿池优先级、权重管理，可提供完善的上游矿池管理。
